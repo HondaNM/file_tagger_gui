@@ -70,8 +70,13 @@ python3 tagger_gui
 
 ### 方法二：Windows用户编译为可执行文件
 
-#### 1. 安装PyInstaller
+#### 1. 安装依赖项
 ```bash
+# 安装所有依赖项（推荐）
+pip install -r requirements-windows.txt
+
+# 或者只安装基本依赖项
+pip install -r requirements.txt
 pip install pyinstaller
 ```
 

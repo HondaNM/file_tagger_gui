@@ -1,0 +1,24 @@
+# Windows-specific requirements for compilation and development
+
+# Core dependencies
+python-dotenv>=0.19.0
+
+# Windows-specific dependencies (required for Windows)
+pywin32>=228
+
+# Drag and drop support (optional)
+tkinterdnd2>=0.3.0
+
+# Development dependencies
+typing-extensions>=4.0.0
+
+# Build and packaging dependencies
+pyinstaller>=5.0.0
+
+# Additional Windows compilation tools
+setuptools>=65.0.0
+wheel>=0.37.0
+
+# Optional: For better PyInstaller compatibility
+# pefile>=2022.5.30
+# pywin32-ctypes>=0.2.0 

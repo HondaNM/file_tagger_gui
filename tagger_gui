@@ -1,0 +1,1002 @@
+import os
+import sys
+import platform
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import List, Optional, Dict, Set
+import logging
+from pathlib import Path
+import glob
+import csv
+
+# Optional imports with fallbacks
+try:
+    from dotenv import load_dotenv, set_key
+except ImportError:
+    load_dotenv = lambda x: None
+    set_key = lambda x, y, z: None
+
+# Platform-specific imports
+if platform.system() == "Windows":
+    try:
+        import win32com.client
+        WINDOWS_AVAILABLE = True
+    except ImportError:
+        WINDOWS_AVAILABLE = False
+else:
+    WINDOWS_AVAILABLE = False
+
+# Optional drag-and-drop support
+try:
+    from tkinterdnd2 import TkinterDnD
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+ENV_FILE = ".env"
+TAG_KEY = "TAG_ROOT_DIR"
+
+
+class FileTagger:
+    """Handles file tagging operations with cross-platform support."""
+    
+    def __init__(self, tag_root: str):
+        self.tag_root = Path(tag_root)
+        
+    def create_shortcut(self, file_path: str, shortcut_path: str) -> bool:
+        """Create a shortcut/symlink to the file."""
+        try:
+            file_path = Path(file_path).resolve()
+            shortcut_path = Path(shortcut_path)
+            
+            if platform.system() == "Windows" and WINDOWS_AVAILABLE:
+                return self._create_windows_shortcut(file_path, shortcut_path)
+            else:
+                return self._create_symlink(file_path, shortcut_path)
+        except Exception as e:
+            logger.error(f"Failed to create shortcut: {e}")
+            return False
+    
+    def _create_windows_shortcut(self, file_path: Path, shortcut_path: Path) -> bool:
+        """Create Windows shortcut using COM."""
+        try:
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortcut(str(shortcut_path))
+            shortcut.TargetPath = str(file_path)
+            shortcut.WorkingDirectory = str(file_path.parent)
+            shortcut.IconLocation = str(file_path)
+            shortcut.save()
+            return True
+        except Exception as e:
+            logger.error(f"Windows shortcut creation failed: {e}")
+            return False
+    
+    def _create_symlink(self, file_path: Path, shortcut_path: Path) -> bool:
+        """Create symlink for non-Windows systems."""
+        try:
+            if shortcut_path.exists():
+                shortcut_path.unlink()
+            shortcut_path.symlink_to(file_path)
+            return True
+        except Exception as e:
+            logger.error(f"Symlink creation failed: {e}")
+            return False
+    
+    def search_files_by_tags(self, selected_tags: List[str], logic: str = "OR") -> Dict[str, List[str]]:
+        """Search for files that have the specified tags using AND or OR logic."""
+        results = {}
+        
+        try:
+            # First, collect all files for each tag
+            tag_files = {}
+            for tag in selected_tags:
+                tag_folder = self.tag_root / f"tag_{tag}"
+                if tag_folder.exists():
+                    # Find all shortcut files in the tag folder
+                    shortcut_files = list(tag_folder.glob("*.lnk"))
+                    tag_files[tag] = []
+                    
+                    for shortcut_file in shortcut_files:
+                        try:
+                            if platform.system() == "Windows" and WINDOWS_AVAILABLE:
+                                # Read Windows shortcut
+                                shell = win32com.client.Dispatch("WScript.Shell")
+                                shortcut = shell.CreateShortcut(str(shortcut_file))
+                                target_path = shortcut.TargetPath
+                            else:
+                                # Read symlink
+                                target_path = str(shortcut_file.resolve())
+                            
+                            if target_path and os.path.exists(target_path):
+                                tag_files[tag].append(target_path)
+                                
+                        except Exception as e:
+                            logger.warning(f"Failed to read shortcut {shortcut_file}: {e}")
+            
+            # Apply logic (AND or OR)
+            if logic == "AND":
+                # Find files that have ALL selected tags
+                if not tag_files:
+                    return results
+                
+                # Start with files from the first tag
+                common_files = set(tag_files[list(tag_files.keys())[0]])
+                
+                # Intersect with files from other tags
+                for tag, files in tag_files.items():
+                    common_files = common_files.intersection(set(files))
+                
+                # Group results by tag (each file will appear under each tag it has)
+                for tag in selected_tags:
+                    results[tag] = []
+                    for file_path in common_files:
+                        if file_path in tag_files.get(tag, []):
+                            results[tag].append(file_path)
+                            
+            else:  # OR logic
+                # Find files that have ANY of the selected tags
+                for tag, files in tag_files.items():
+                    results[tag] = files
+                            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            
+        return results
+    
+    def export_to_csv(self, csv_path: str) -> bool:
+        """Export all tag-file relationships to CSV."""
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['tag', 'file_path', 'file_name'])
+                
+                # Iterate through all tag folders
+                for tag_folder in self.tag_root.iterdir():
+                    if tag_folder.is_dir() and tag_folder.name.startswith('tag_'):
+                        tag_name = tag_folder.name[4:]  # Remove 'tag_' prefix
+                        
+                        # Find all shortcut files in the tag folder
+                        shortcut_files = list(tag_folder.glob("*.lnk"))
+                        
+                        for shortcut_file in shortcut_files:
+                            try:
+                                if platform.system() == "Windows" and WINDOWS_AVAILABLE:
+                                    # Read Windows shortcut
+                                    shell = win32com.client.Dispatch("WScript.Shell")
+                                    shortcut = shell.CreateShortcut(str(shortcut_file))
+                                    target_path = shortcut.TargetPath
+                                else:
+                                    # Read symlink
+                                    target_path = str(shortcut_file.resolve())
+                                
+                                if target_path and os.path.exists(target_path):
+                                    file_name = os.path.basename(target_path)
+                                    writer.writerow([tag_name, target_path, file_name])
+                                    
+                            except Exception as e:
+                                logger.warning(f"Failed to read shortcut {shortcut_file}: {e}")
+                                continue
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to export CSV: {e}")
+            return False
+    
+    def import_from_csv(self, csv_path: str) -> Dict[str, int]:
+        """Import tag-file relationships from CSV and create shortcuts."""
+        results = {'success': 0, 'failed': 0, 'skipped': 0}
+        
+        try:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                
+                for row in reader:
+                    try:
+                        tag_name = row['tag'].strip()
+                        file_path = row['file_path'].strip()
+                        file_name = row['file_name'].strip()
+                        
+                        # Validate data
+                        if not tag_name or not file_path or not file_name:
+                            results['skipped'] += 1
+                            continue
+                        
+                        # Check if file exists
+                        if not os.path.exists(file_path):
+                            results['failed'] += 1
+                            logger.warning(f"File not found: {file_path}")
+                            continue
+                        
+                        # Create tag folder
+                        tag_folder = self.tag_root / f"tag_{tag_name}"
+                        tag_folder.mkdir(exist_ok=True)
+                        
+                        # Create shortcut
+                        shortcut_path = tag_folder / f"{file_name}.lnk"
+                        
+                        if self.create_shortcut(file_path, str(shortcut_path)):
+                            results['success'] += 1
+                        else:
+                            results['failed'] += 1
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to process CSV row: {e}")
+                        results['failed'] += 1
+                        continue
+            
+            return results
+        except Exception as e:
+            logger.error(f"Failed to import CSV: {e}")
+            return results
+
+
+class TaggerApp:
+    """Main application class for the file tagging GUI."""
+    
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("文档标签工具")
+        self.root.geometry("1000x700")
+        self.root.configure(bg="white")
+        
+        # Initialize data
+        self.files: List[str] = []
+        self.tag_root: Optional[str] = None
+        self.file_tagger: Optional[FileTagger] = None
+        self.search_results: Dict[str, List[str]] = {}
+        self.available_tags: List[str] = []
+        
+        # Setup application
+        self._load_environment()
+        self._setup_ui()
+        self._refresh_tag_list()
+        
+    def _load_environment(self) -> None:
+        """Load environment configuration."""
+        load_dotenv(ENV_FILE)
+        self.tag_root = os.getenv(TAG_KEY)
+        
+        if not self.tag_root or not os.path.isdir(self.tag_root):
+            self.tag_root = filedialog.askdirectory(title="请选择标签文件夹根目录")
+            if not self.tag_root:
+                messagebox.showerror("错误", "未选择标签目录，程序将退出。")
+                self.root.destroy()
+                return
+            set_key(ENV_FILE, TAG_KEY, self.tag_root)
+        
+        self.file_tagger = FileTagger(self.tag_root)
+    
+    def _setup_ui(self) -> None:
+        """Setup the user interface."""
+        self._create_menu()
+        
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Create tabs
+        self._create_tagging_tab()
+        self._create_search_tab()
+        
+        # Bind tab change event
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+        
+        # Setup drag and drop if available
+        if DND_AVAILABLE:
+            self._setup_drag_drop()
+    
+    def _create_menu(self) -> None:
+        """Create application menu."""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="添加文件", command=self._add_files)
+        file_menu.add_command(label="清空文件列表", command=self._clear_files)
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self.root.quit)
+        
+        tag_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="标签", menu=tag_menu)
+        tag_menu.add_command(label="新建标签", command=self._create_new_tag)
+        tag_menu.add_command(label="删除标签", command=self._delete_tag)
+        tag_menu.add_separator()
+        tag_menu.add_command(label="刷新标签列表", command=self._refresh_tag_list)
+        
+        search_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="搜索", menu=search_menu)
+        search_menu.add_command(label="搜索文件", command=self._show_search_tab)
+        search_menu.add_command(label="清空搜索结果", command=self._clear_search_results)
+        
+        backup_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="备份", menu=backup_menu)
+        backup_menu.add_command(label="导出到CSV", command=self._export_to_csv)
+        backup_menu.add_command(label="从CSV导入", command=self._import_from_csv)
+    
+    def _create_tagging_tab(self) -> None:
+        """Create the tagging tab."""
+        tagging_frame = ttk.Frame(self.notebook)
+        self.notebook.add(tagging_frame, text="文件标签")
+        
+        self._create_file_section(tagging_frame)
+        self._create_tag_section(tagging_frame)
+        self._create_action_buttons(tagging_frame)
+    
+    def _create_search_tab(self) -> None:
+        """Create the search tab."""
+        search_frame = ttk.Frame(self.notebook)
+        self.notebook.add(search_frame, text="搜索文件")
+        
+        self._create_search_section(search_frame)
+        self._create_search_results_section(search_frame)
+    
+    def _create_file_section(self, parent) -> None:
+        """Create file selection section."""
+        file_frame = ttk.LabelFrame(parent, text="文件列表")
+        file_frame.pack(fill="both", expand=False, padx=10, pady=5)
+        
+        # File list with scrollbar
+        file_list_frame = tk.Frame(file_frame)
+        file_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.file_listbox = tk.Listbox(file_list_frame, height=6)
+        file_scrollbar = tk.Scrollbar(file_list_frame, orient="vertical", command=self.file_listbox.yview)
+        self.file_listbox.configure(yscrollcommand=file_scrollbar.set)
+        
+        self.file_listbox.pack(side="left", fill="both", expand=True)
+        file_scrollbar.pack(side="right", fill="y")
+        
+        # File buttons
+        file_btn_frame = tk.Frame(file_frame)
+        file_btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(file_btn_frame, text="添加文件", command=self._add_files).pack(side="left", padx=5)
+        ttk.Button(file_btn_frame, text="移除选中", command=self._remove_selected_files).pack(side="left", padx=5)
+        ttk.Button(file_btn_frame, text="清空列表", command=self._clear_files).pack(side="left", padx=5)
+    
+    def _create_tag_section(self, parent) -> None:
+        """Create tag selection section."""
+        tag_frame = ttk.LabelFrame(parent, text="标签列表")
+        tag_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Tag list with scrollbar
+        tag_list_frame = tk.Frame(tag_frame)
+        tag_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.tag_listbox = tk.Listbox(tag_list_frame, selectmode="multiple", height=8)
+        tag_scrollbar = tk.Scrollbar(tag_list_frame, orient="vertical", command=self.tag_listbox.yview)
+        self.tag_listbox.configure(yscrollcommand=tag_scrollbar.set)
+        
+        self.tag_listbox.pack(side="left", fill="both", expand=True)
+        tag_scrollbar.pack(side="right", fill="y")
+        
+        # Tag buttons
+        tag_btn_frame = tk.Frame(tag_frame)
+        tag_btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(tag_btn_frame, text="新建标签", command=self._create_new_tag).pack(side="left", padx=5)
+        ttk.Button(tag_btn_frame, text="删除标签", command=self._delete_tag).pack(side="left", padx=5)
+        ttk.Button(tag_btn_frame, text="刷新列表", command=self._refresh_tag_list).pack(side="left", padx=5)
+    
+    def _create_search_section(self, parent) -> None:
+        """Create search section."""
+        search_frame = ttk.LabelFrame(parent, text="搜索条件")
+        search_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Manual tag entry
+        manual_entry_frame = tk.Frame(search_frame)
+        manual_entry_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(manual_entry_frame, text="手动输入标签:").pack(side="left", padx=5)
+        self.manual_tag_entry = ttk.Combobox(manual_entry_frame, width=30)
+        self.manual_tag_entry.pack(side="left", padx=5, fill="x", expand=True)
+        self.manual_tag_entry.bind('<Return>', lambda e: self._add_manual_tag())
+        self.manual_tag_entry.bind('<Button-1>', self._on_manual_tag_click)
+        ttk.Button(manual_entry_frame, text="添加", command=self._add_manual_tag).pack(side="left", padx=5)
+        
+        # Ensure entry widget is properly configured
+        self.manual_tag_entry.config(state="normal")
+        
+        # Search tag selection
+        search_tag_frame = tk.Frame(search_frame)
+        search_tag_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(search_tag_frame, text="选择标签:").pack(side="left", padx=5)
+        
+        # Search tag listbox with scrollbar
+        search_list_frame = tk.Frame(search_tag_frame)
+        search_list_frame.pack(side="left", fill="x", expand=True, padx=5)
+        
+        self.search_tag_listbox = tk.Listbox(search_list_frame, selectmode="multiple", height=4)
+        search_scrollbar = tk.Scrollbar(search_list_frame, orient="vertical", command=self.search_tag_listbox.yview)
+        self.search_tag_listbox.configure(yscrollcommand=search_scrollbar.set)
+        
+        self.search_tag_listbox.pack(side="left", fill="x", expand=True)
+        search_scrollbar.pack(side="right", fill="y")
+        
+        # Search logic selection
+        logic_frame = tk.Frame(search_frame)
+        logic_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(logic_frame, text="搜索逻辑:").pack(side="left", padx=5)
+        self.search_logic = tk.StringVar(value="OR")
+        ttk.Radiobutton(logic_frame, text="OR (任一标签)", variable=self.search_logic, value="OR").pack(side="left", padx=5)
+        ttk.Radiobutton(logic_frame, text="AND (所有标签)", variable=self.search_logic, value="AND").pack(side="left", padx=5)
+        
+        # Search buttons
+        search_btn_frame = tk.Frame(search_frame)
+        search_btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(search_btn_frame, text="搜索", command=self._search_files, style="Accent.TButton").pack(side="left", padx=5)
+        ttk.Button(search_btn_frame, text="清空选择", command=self._clear_search_selection).pack(side="left", padx=5)
+        ttk.Button(search_btn_frame, text="全选标签", command=self._select_all_tags).pack(side="left", padx=5)
+        ttk.Button(search_btn_frame, text="移除选中", command=self._remove_selected_search_tags).pack(side="left", padx=5)
+        
+        # Search status
+        self.search_status_label = ttk.Label(search_btn_frame, text="就绪")
+        self.search_status_label.pack(side="right", padx=5)
+    
+    def _create_search_results_section(self, parent) -> None:
+        """Create search results section."""
+        results_frame = ttk.LabelFrame(parent, text="搜索结果")
+        results_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Results treeview with proper frame
+        tree_frame = tk.Frame(results_frame)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Results treeview
+        columns = ("标签", "文件路径", "文件名")
+        self.results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=15)
+        
+        # Configure columns
+        self.results_tree.heading("标签", text="标签")
+        self.results_tree.heading("文件路径", text="文件路径")
+        self.results_tree.heading("文件名", text="文件名")
+        
+        self.results_tree.column("标签", width=100)
+        self.results_tree.column("文件路径", width=400)
+        self.results_tree.column("文件名", width=200)
+        
+        # Scrollbars for results
+        results_v_scrollbar = tk.Scrollbar(tree_frame, orient="vertical", command=self.results_tree.yview)
+        results_h_scrollbar = tk.Scrollbar(tree_frame, orient="horizontal", command=self.results_tree.xview)
+        self.results_tree.configure(yscrollcommand=results_v_scrollbar.set, xscrollcommand=results_h_scrollbar.set)
+        
+        self.results_tree.pack(side="left", fill="both", expand=True)
+        results_v_scrollbar.pack(side="right", fill="y")
+        results_h_scrollbar.pack(side="bottom", fill="x")
+        
+        # Results buttons
+        results_btn_frame = tk.Frame(results_frame)
+        results_btn_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Button(results_btn_frame, text="打开文件", command=self._open_selected_file).pack(side="left", padx=5)
+        ttk.Button(results_btn_frame, text="打开文件位置", command=self._open_file_location).pack(side="left", padx=5)
+        ttk.Button(results_btn_frame, text="复制文件路径", command=self._copy_file_path).pack(side="left", padx=5)
+        ttk.Button(results_btn_frame, text="清空结果", command=self._clear_search_results).pack(side="left", padx=5)
+    
+    def _create_action_buttons(self, parent) -> None:
+        """Create action buttons."""
+        action_frame = tk.Frame(parent)
+        action_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.apply_btn = ttk.Button(
+            action_frame, 
+            text="为选中文件打标签", 
+            command=self._apply_tags,
+            style="Accent.TButton"
+        )
+        self.apply_btn.pack(side="left", padx=5)
+        
+        # Status label
+        self.status_label = ttk.Label(action_frame, text="就绪")
+        self.status_label.pack(side="right", padx=5)
+    
+    def _setup_drag_drop(self) -> None:
+        """Setup drag and drop functionality."""
+        try:
+            self.root.drop_target_register('DND_Files')
+            self.root.dnd_bind('<<Drop>>', self._drop_files)
+        except Exception as e:
+            logger.warning(f"Drag and drop setup failed: {e}")
+    
+    def _refresh_tag_list(self) -> None:
+        """Refresh the tag list display."""
+        self.tag_listbox.delete(0, tk.END)
+        self.search_tag_listbox.delete(0, tk.END)
+        
+        if not self.tag_root or not os.path.exists(self.tag_root):
+            return
+            
+        try:
+            existing_tags = []
+            for name in os.listdir(self.tag_root):
+                if name.startswith("tag_") and os.path.isdir(os.path.join(self.tag_root, name)):
+                    tag_name = name[4:]
+                    existing_tags.append(tag_name)
+                    self.tag_listbox.insert(tk.END, tag_name)
+                    self.search_tag_listbox.insert(tk.END, tag_name)
+            
+            # Store available tags for autocomplete
+            self.available_tags = existing_tags.copy()
+            
+            # Update combobox values with existing tags
+            if hasattr(self, 'manual_tag_entry'):
+                self.manual_tag_entry['values'] = existing_tags
+        except Exception as e:
+            logger.error(f"Failed to refresh tag list: {e}")
+    
+    def _add_files(self) -> None:
+        """Add files to the list."""
+        files = filedialog.askopenfilenames(title="选择文件")
+        for file in files:
+            if file not in self.files:
+                self.files.append(file)
+                self.file_listbox.insert(tk.END, os.path.basename(file))
+        self._update_status()
+    
+    def _remove_selected_files(self) -> None:
+        """Remove selected files from the list."""
+        selected_indices = self.file_listbox.curselection()
+        for index in reversed(selected_indices):
+            self.files.pop(index)
+            self.file_listbox.delete(index)
+        self._update_status()
+    
+    def _clear_files(self) -> None:
+        """Clear all files from the list."""
+        self.files.clear()
+        self.file_listbox.delete(0, tk.END)
+        self._update_status()
+    
+    def _drop_files(self, event) -> None:
+        """Handle file drop events."""
+        try:
+            for file in self.root.tk.splitlist(event.data):
+                if os.path.isfile(file) and file not in self.files:
+                    self.files.append(file)
+                    self.file_listbox.insert(tk.END, os.path.basename(file))
+            self._update_status()
+        except Exception as e:
+            logger.error(f"Drop handling failed: {e}")
+    
+    def _create_new_tag(self) -> None:
+        """Create a new tag."""
+        tag_name = simpledialog.askstring("新建标签", "请输入新标签名称：")
+        if not tag_name:
+            return
+            
+        # Validate tag name
+        if not tag_name.strip():
+            messagebox.showwarning("警告", "标签名称不能为空")
+            return
+            
+        # Check for invalid characters
+        invalid_chars = '<>:"/\\|?*'
+        if any(char in tag_name for char in invalid_chars):
+            messagebox.showwarning("警告", f"标签名称不能包含以下字符: {invalid_chars}")
+            return
+        
+        full_tag = f"tag_{tag_name}"
+        tag_path = os.path.join(self.tag_root, full_tag)
+        
+        try:
+            os.makedirs(tag_path, exist_ok=True)
+            self._refresh_tag_list()
+            messagebox.showinfo("成功", f"标签 '{tag_name}' 创建成功")
+        except Exception as e:
+            logger.error(f"Failed to create tag: {e}")
+            messagebox.showerror("错误", f"创建标签失败: {e}")
+    
+    def _delete_tag(self) -> None:
+        """Delete selected tags."""
+        selected_indices = self.tag_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("警告", "请选择要删除的标签")
+            return
+            
+        if not messagebox.askyesno("确认", "确定要删除选中的标签吗？"):
+            return
+            
+        for index in reversed(selected_indices):
+            tag_name = self.tag_listbox.get(index)
+            full_tag = f"tag_{tag_name}"
+            tag_path = os.path.join(self.tag_root, full_tag)
+            
+            try:
+                import shutil
+                shutil.rmtree(tag_path)
+            except Exception as e:
+                logger.error(f"Failed to delete tag {tag_name}: {e}")
+                messagebox.showerror("错误", f"删除标签 '{tag_name}' 失败: {e}")
+        
+        self._refresh_tag_list()
+    
+    def _apply_tags(self) -> None:
+        """Apply selected tags to files."""
+        if not self.files:
+            messagebox.showwarning("警告", "请先添加文件")
+            return
+            
+        selected_indices = self.tag_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("警告", "请至少选择一个标签")
+            return
+        
+        if not messagebox.askyesno("确认", f"确定要为 {len(self.files)} 个文件应用 {len(selected_indices)} 个标签吗？"):
+            return
+        
+        tags = [f"tag_{self.tag_listbox.get(i)}" for i in selected_indices]
+        success_count = 0
+        total_operations = len(self.files) * len(tags)
+        current_operation = 0
+        
+        self.apply_btn.config(state="disabled")
+        self.status_label.config(text="正在处理...")
+        self.root.update()
+        
+        try:
+            for file_path in self.files:
+                for tag in tags:
+                    current_operation += 1
+                    self.status_label.config(text=f"处理中... ({current_operation}/{total_operations})")
+                    self.root.update()
+                    
+                    tag_folder = os.path.join(self.tag_root, tag)
+                    os.makedirs(tag_folder, exist_ok=True)
+                    file_name = os.path.basename(file_path)
+                    shortcut_path = os.path.join(tag_folder, f"{file_name}.lnk")
+                    
+                    if self.file_tagger.create_shortcut(file_path, shortcut_path):
+                        success_count += 1
+                    else:
+                        logger.warning(f"Failed to create shortcut for {file_path} in {tag}")
+            
+            messagebox.showinfo("完成", f"成功处理 {success_count}/{total_operations} 个操作")
+        except Exception as e:
+            logger.error(f"Tag application failed: {e}")
+            messagebox.showerror("错误", f"应用标签时发生错误: {e}")
+        finally:
+            self.apply_btn.config(state="normal")
+            self._update_status()
+    
+    def _search_files(self) -> None:
+        """Search for files based on selected tags."""
+        selected_indices = self.search_tag_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("警告", "请至少选择一个标签进行搜索")
+            return
+        
+        selected_tags = [self.search_tag_listbox.get(i) for i in selected_indices]
+        
+        self.search_status_label.config(text="搜索中...")
+        self.root.update()
+        
+        try:
+            logic = self.search_logic.get()
+            self.search_results = self.file_tagger.search_files_by_tags(selected_tags, logic)
+            self._display_search_results()
+            
+            total_files = sum(len(files) for files in self.search_results.values())
+            logic_text = "AND" if logic == "AND" else "OR"
+            self.search_status_label.config(text=f"找到 {total_files} 个文件 ({logic_text} 逻辑)")
+            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            messagebox.showerror("错误", f"搜索失败: {e}")
+            self.search_status_label.config(text="搜索失败")
+    
+    def _display_search_results(self) -> None:
+        """Display search results in the treeview."""
+        # Clear existing results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        
+        # Add new results
+        for tag, files in self.search_results.items():
+            for file_path in files:
+                file_name = os.path.basename(file_path)
+                self.results_tree.insert("", "end", values=(tag, file_path, file_name))
+    
+    def _clear_search_selection(self) -> None:
+        """Clear search tag selection."""
+        self.search_tag_listbox.selection_clear(0, tk.END)
+    
+    def _select_all_tags(self) -> None:
+        """Select all tags in search."""
+        self.search_tag_listbox.selection_set(0, tk.END)
+    
+    def _is_chinese_text(self, text: str) -> bool:
+        """Check if the text contains Chinese characters."""
+        for char in text:
+            # Check if character is in Chinese Unicode ranges
+            if '\u4e00' <= char <= '\u9fff':  # Basic Chinese characters
+                return True
+            elif '\u3400' <= char <= '\u4dbf':  # Extended Chinese characters
+                return True
+            elif 0x20000 <= ord(char) <= 0x2a6df:  # Extended Chinese characters
+                return True
+        return False
+    
+    def _is_chinese_char(self, char: str) -> bool:
+        """Check if a single character is Chinese."""
+        if '\u4e00' <= char <= '\u9fff':  # Basic Chinese characters
+            return True
+        elif '\u3400' <= char <= '\u4dbf':  # Extended Chinese characters
+            return True
+        elif 0x20000 <= ord(char) <= 0x2a6df:  # Extended Chinese characters
+            return True
+        return False
+    
+    def _contains_chinese_and_english(self, text: str) -> bool:
+        """Check if text contains both Chinese and English characters."""
+        has_chinese = False
+        has_english = False
+        
+        for char in text:
+            if char.isalpha():
+                if self._is_chinese_char(char):
+                    has_chinese = True
+                else:
+                    has_english = True
+                    
+            if has_chinese and has_english:
+                return True
+                
+        return False
+    
+    def _on_manual_tag_click(self, event) -> None:
+        """Handle click events for manual tag entry to show dropdown with filtered results."""
+        try:
+            current_text = self.manual_tag_entry.get().strip()
+            
+            if not current_text:
+                # Show all available tags when input is empty
+                if self.available_tags:
+                    self.manual_tag_entry['values'] = self.available_tags
+                    # Use a small delay to ensure the dropdown appears
+                    self.root.after(10, lambda: self.manual_tag_entry.event_generate('<Down>'))
+                return
+            
+            # Filter tags based on current input
+            matching_tags = []
+            current_text_lower = current_text.lower()
+            
+            if self._is_chinese_text(current_text):
+                # Chinese character matching: all input Chinese chars must be in the tag
+                for tag in self.available_tags:
+                    tag_lower = tag.lower()
+                    all_chars_match = all(char in tag_lower for char in current_text_lower if self._is_chinese_char(char))
+                    if all_chars_match:
+                        matching_tags.append(tag)
+            else:
+                # English word-by-word matching
+                for tag in self.available_tags:
+                    tag_lower = tag.lower()
+                    input_words = current_text_lower.split()
+                    tag_words = tag_lower.split()
+                    all_words_match = True
+                    for input_word in input_words:
+                        word_found = False
+                        for tag_word in tag_words:
+                            if input_word in tag_word or tag_word in input_word:
+                                word_found = True
+                                break
+                        if not word_found:
+                            all_words_match = False
+                            break
+                    if all_words_match:
+                        matching_tags.append(tag)
+            
+            # Update combobox values with matching tags
+            self.manual_tag_entry['values'] = matching_tags
+            
+            # Show the dropdown list if there are matching tags
+            if matching_tags:
+                # Use a small delay to ensure the dropdown appears
+                self.root.after(10, lambda: self.manual_tag_entry.event_generate('<Down>'))
+            
+        except Exception as e:
+            logger.error(f"Error in manual tag click: {e}")
+    
+    def _add_manual_tag(self) -> None:
+        """Add manually entered tag to search list."""
+        try:
+            tag_name = self.manual_tag_entry.get().strip()
+            
+            if not tag_name:
+                messagebox.showwarning("警告", "请输入标签名称")
+                return
+            
+            # Check if tag already exists in list
+            existing_tags = self.search_tag_listbox.get(0, tk.END)
+            if tag_name in existing_tags:
+                messagebox.showwarning("警告", f"标签 '{tag_name}' 已存在")
+                return
+            
+            # Add to listbox
+            self.search_tag_listbox.insert(tk.END, tag_name)
+            self.manual_tag_entry.delete(0, tk.END)
+            
+        except Exception as e:
+            logger.error(f"Error in _add_manual_tag: {e}")
+            messagebox.showerror("错误", f"添加标签时发生错误: {e}")
+    
+    def _remove_selected_search_tags(self) -> None:
+        """Remove selected tags from search list."""
+        selected_indices = self.search_tag_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("警告", "请选择要移除的标签")
+            return
+        
+        for index in reversed(selected_indices):
+            self.search_tag_listbox.delete(index)
+    
+    def _clear_search_results(self) -> None:
+        """Clear search results."""
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        self.search_results.clear()
+        self.search_status_label.config(text="就绪")
+    
+    def _show_search_tab(self) -> None:
+        """Switch to search tab."""
+        self.notebook.select(1)
+        # Focus the manual tag entry widget
+        self.root.after(100, self._focus_manual_entry)
+    
+    def _focus_manual_entry(self) -> None:
+        """Focus the manual tag entry widget."""
+        try:
+            self.manual_tag_entry.focus_set()
+            print("Manual entry widget focused")
+        except Exception as e:
+            print(f"Failed to focus manual entry: {e}")
+    
+    def _on_tab_changed(self, event) -> None:
+        """Handle tab change events."""
+        current_tab = self.notebook.select()
+        if current_tab == self.notebook.tabs()[1]:  # Search tab
+            self.root.after(100, self._focus_manual_entry)
+    
+    def _open_selected_file(self) -> None:
+        """Open the selected file."""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择要打开的文件")
+            return
+        
+        item = self.results_tree.item(selection[0])
+        file_path = item['values'][1]
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(file_path)
+            elif platform.system() == "Darwin":  # macOS
+                os.system(f"open '{file_path}'")
+            else:  # Linux
+                os.system(f"xdg-open '{file_path}'")
+        except Exception as e:
+            logger.error(f"Failed to open file {file_path}: {e}")
+            messagebox.showerror("错误", f"无法打开文件: {e}")
+    
+    def _open_file_location(self) -> None:
+        """Open the folder containing the selected file."""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择要打开位置的文件")
+            return
+        
+        item = self.results_tree.item(selection[0])
+        file_path = item['values'][1]
+        folder_path = os.path.dirname(file_path)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(folder_path)
+            elif platform.system() == "Darwin":  # macOS
+                os.system(f"open '{folder_path}'")
+            else:  # Linux
+                os.system(f"xdg-open '{folder_path}'")
+        except Exception as e:
+            logger.error(f"Failed to open folder {folder_path}: {e}")
+            messagebox.showerror("错误", f"无法打开文件夹: {e}")
+    
+    def _copy_file_path(self) -> None:
+        """Copy the selected file path to clipboard."""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择要复制路径的文件")
+            return
+        
+        item = self.results_tree.item(selection[0])
+        file_path = item['values'][1]
+        
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(file_path)
+            messagebox.showinfo("成功", "文件路径已复制到剪贴板")
+        except Exception as e:
+            logger.error(f"Failed to copy to clipboard: {e}")
+            messagebox.showerror("错误", f"复制到剪贴板失败: {e}")
+    
+    def _export_to_csv(self) -> None:
+        """Export all tag-file relationships to CSV."""
+        try:
+            csv_path = filedialog.asksaveasfilename(
+                title="选择CSV保存位置",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            
+            if not csv_path:
+                return
+            
+            if self.file_tagger.export_to_csv(csv_path):
+                messagebox.showinfo("成功", f"已成功导出到: {csv_path}")
+            else:
+                messagebox.showerror("错误", "导出失败，请检查文件路径和权限")
+                
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+            messagebox.showerror("错误", f"导出失败: {e}")
+    
+    def _import_from_csv(self) -> None:
+        """Import tag-file relationships from CSV."""
+        try:
+            csv_path = filedialog.askopenfilename(
+                title="选择CSV文件",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            
+            if not csv_path:
+                return
+            
+            # Confirm import
+            if not messagebox.askyesno("确认", "确定要导入CSV文件吗？这将创建新的标签和文件链接。"):
+                return
+            
+            # Import CSV
+            results = self.file_tagger.import_from_csv(csv_path)
+            
+            # Show results
+            message = f"导入完成:\n成功: {results['success']}\n失败: {results['failed']}\n跳过: {results['skipped']}"
+            messagebox.showinfo("导入结果", message)
+            
+            # Refresh tag list
+            self._refresh_tag_list()
+            
+        except Exception as e:
+            logger.error(f"Import failed: {e}")
+            messagebox.showerror("错误", f"导入失败: {e}")
+    
+    def _update_status(self) -> None:
+        """Update the status display."""
+        file_count = len(self.files)
+        tag_count = self.tag_listbox.size()
+        self.status_label.config(text=f"文件: {file_count} | 标签: {tag_count}")
+
+
+def main():
+    """Main application entry point."""
+    try:
+        if DND_AVAILABLE:
+            root = TkinterDnD.Tk()
+        else:
+            root = tk.Tk()
+            
+        app = TaggerApp(root)
+        root.mainloop()
+    except Exception as e:
+        logger.error(f"Application failed to start: {e}")
+        messagebox.showerror("错误", f"应用程序启动失败: {e}")
+
+
+if __name__ == "__main__":
+    main()

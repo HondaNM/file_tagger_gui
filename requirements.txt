@@ -1,0 +1,11 @@
+# Core dependencies
+python-dotenv>=0.19.0
+
+# Windows-specific dependencies (optional)
+pywin32>=228; sys_platform == "win32"
+
+# Drag and drop support (optional)
+tkinterdnd2>=0.3.0
+
+# Development dependencies
+typing-extensions>=4.0.0 

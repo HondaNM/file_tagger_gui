@@ -8,4 +8,11 @@ pywin32>=228; sys_platform == "win32"
 tkinterdnd2>=0.3.0
 
 # Development dependencies
-typing-extensions>=4.0.0 
+typing-extensions>=4.0.0
+
+# Build and packaging dependencies
+pyinstaller>=5.0.0
+
+# Optional: For better Windows compilation
+# setuptools>=65.0.0
+# wheel>=0.37.0 
